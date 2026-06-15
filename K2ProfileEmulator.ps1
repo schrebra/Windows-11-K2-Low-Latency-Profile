@@ -3,10 +3,8 @@ $TargetDir = "C:\ProgramData\K2Emulator"
 $ScriptPath = "$TargetDir\K2Monitor.ps1"
 $TaskName = "K2ProfileEmulator"
 
-# Create the directory if it doesn't exist
-if (-not (Test-Path $TargetDir)) {
-    New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
-}
+# Create the directory
+if (-not (Test-Path $TargetDir)) { New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null }
 
 # 2. Write the K2 Monitor code into the permanent file
 $K2ScriptContent = @"
@@ -98,28 +96,14 @@ Add-Type -TypeDefinition `$K2Code
 "@
 
 Set-Content -Path $ScriptPath -Value $K2ScriptContent -Force
-Write-Host "K2 Monitor script successfully saved to $ScriptPath" -ForegroundColor Green
-
 
 # 3. Create and Register the Scheduled Task
-Write-Host "Creating Windows Scheduled Task..." -ForegroundColor Cyan
-
-# Define the action: Launch powershell silently in the background
 $TaskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
-
-# Define the trigger: Fire immediately when your user logs into the desktop
 $TaskTrigger = New-ScheduledTaskTrigger -AtLogon
-
-# Define permissions: Run with local Admin rights (Required for powercfg changes)
 $TaskPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -RunLevel Highest
-
-# Define task configurations
 $TaskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Days 365)
 
-# Register the task into the OS
 Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $TaskTrigger -Principal $TaskPrincipal -Settings $TaskSettings -Force
 
-Write-Host "Deployment complete! The K2 profile emulator will now run completely hidden in the background every time you log in." -ForegroundColor Green
-Write-Host "To test it right now without logging out, run: Start-ScheduledTask -TaskName '$TaskName'" -ForegroundColor Yellow
-
-Start-ScheduledTask -TaskName 'K2ProfileEmulator'-verbose
+Write-Host "Deployment complete! Starting service..." -ForegroundColor Green
+Start-ScheduledTask -TaskName $TaskName
