@@ -1,5 +1,10 @@
 # ==============================================================================
-# K2 LOW-LATENCY EMULATOR (NATIVE API OPTIMIZED V3.0 - STEALTH BOOST)
+# K2 LOW-LATENCY EMULATOR (NATIVE API OPTIMIZED V3.2 - UNIVERSAL)
+# ==============================================================================
+# WORKS FOR BOTH LAPTOPS AND DESKTOPS:
+# - Desktops: Always plugged in (AC), so K2 Boost is always active.
+# - Laptops: Active when plugged in (AC). Automatically disables K2 Boost 
+#   when on battery to preserve battery life.
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -14,10 +19,8 @@ if (-not (Test-Path $TargetDir)) {
 }
 
 Write-Host "Restoring missing default power plans..." -ForegroundColor Cyan
-# Force Windows to rebuild the default Balanced, High Performance, and Power Saver plans
 powercfg -restoredefaultschemes
 
-# Unhide and restore Ultimate Performance if it's missing
  $ultimatePerfGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
  $existingPlans = powercfg -list
 if ($existingPlans -notmatch $ultimatePerfGuid) {
@@ -67,6 +70,21 @@ public class K2ProfileEmulator
     [DllImport("powrprof.dll", EntryPoint = "PowerWriteDCValueIndex")]
     static extern uint PowerWriteDCValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettingsGuid, ref Guid PowerSettingGuid, uint DcValueIndex);
 
+    // --- LAPTOP BATTERY CHECK API ---
+    [DllImport("kernel32.dll")]
+    static extern bool GetSystemPowerStatus(ref SYSTEM_POWER_STATUS lpSystemPowerStatus);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SYSTEM_POWER_STATUS
+    {
+        public byte ACLineStatus; // 0 = Offline, 1 = Online, 255 = Unknown
+        public byte BatteryFlag;
+        public byte BatteryLifePercent;
+        public byte SystemStatusFlag;
+        public uint BatteryLifeTime;
+        public uint BatteryFullLifeTime;
+    }
+
     [DllImport("kernel32.dll")]
     static extern IntPtr LocalFree(IntPtr hMem);
 
@@ -83,9 +101,7 @@ public class K2ProfileEmulator
     static DateTime lastBoost = DateTime.MinValue;
 
     // --- PROCESSOR POWER GUIDs ---
-    // Subgroup for Processor Power Management
     static Guid procSubGroup = new Guid("54533251-82be-4824-96c1-47b60b740d00");
-    // Setting for Minimum Processor State
     static Guid minProcState = new Guid("893dee8e-2bef-41e0-89c6-b55d0929964c");
 
     // --- MAIN INITIALIZATION FUNCTION ---
@@ -117,7 +133,18 @@ public class K2ProfileEmulator
     // --- THE STEALTH BOOST EXECUTION FUNCTION ---
     static void BoostCPU()
     {
-        // 1. Get the currently active power plan (whichever one the user is currently on)
+        // 0. LAPTOP CHECK: If on battery (ACLineStatus == 0), do not boost to save power.
+        // Desktops will always return 1 (Online) and proceed normally.
+        SYSTEM_POWER_STATUS status = new SYSTEM_POWER_STATUS();
+        if (GetSystemPowerStatus(ref status))
+        {
+            if (status.ACLineStatus == 0) 
+            {
+                return; // Skip the boost entirely
+            }
+        }
+
+        // 1. Get the currently active power plan
         IntPtr activeSchemePtr;
         PowerGetActiveScheme(IntPtr.Zero, out activeSchemePtr);
         Guid activeScheme = (Guid)Marshal.PtrToStructure(activeSchemePtr, typeof(Guid));
@@ -129,14 +156,13 @@ public class K2ProfileEmulator
         bool hasDC = PowerReadDCValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, out dcVal) == 0;
 
         // 3. Temporarily set Minimum Processor State to 100% (The K2 Burst)
-        // This forces the CPU to max frequency without changing the active power plan!
         if (hasAC) PowerWriteACValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, 100);
         if (hasDC) PowerWriteDCValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, 100);
 
         // 4. Hold this state for exactly 2,000 milliseconds (2 seconds).
         Thread.Sleep(2000);
 
-        // 5. Restore the original Minimum Processor States so it can downclock to save power
+        // 5. Restore the original Minimum Processor States
         if (hasAC) PowerWriteACValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, acVal);
         if (hasDC) PowerWriteDCValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, dcVal);
     }
@@ -167,4 +193,4 @@ Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $TaskTri
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Start-ScheduledTask -TaskName $TaskName
 
-Write-Host "Deployment complete! Plans restored, flicker eliminated, and Stealth Boost is active." -ForegroundColor Green
+Write-Host "K2 Optimization Active" -ForegroundColor Green
