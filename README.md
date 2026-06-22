@@ -1,5 +1,3 @@
-Here is the rewritten documentation, fully updated to reflect the V3.2 "Stealth Boost" logic, native API integrations, power plan restoration, and laptop optimizations we implemented:
-
 # K2 Profile Emulator
 
 A lightweight, event-driven PowerShell and C# utility that brings the Windows 11 26H2 "K2" low-latency shell optimizations to any Windows 10 or Windows 11 system. 
