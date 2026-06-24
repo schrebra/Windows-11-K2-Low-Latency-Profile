@@ -1,18 +1,41 @@
 # ==============================================================================
-# K2 LOW-LATENCY EMULATOR (NATIVE API OPTIMIZED V3.2 - UNIVERSAL)
+# K2 LOW-LATENCY EMULATOR (TIERED AC/DC BOOSTING V4.2)
 # ==============================================================================
-# WORKS FOR BOTH LAPTOPS AND DESKTOPS:
-# - Desktops: Always plugged in (AC), so K2 Boost is always active.
-# - Laptops: Active when plugged in (AC). Automatically disables K2 Boost 
-#   when on battery to preserve battery life.
-# ==============================================================================
+
+# --- AUTO-ELEVATION CHECK ---
+$currentUser = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+$isAdmin = $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
+    Write-Host "Administrator privileges required. Attempting to restart as Admin..." -ForegroundColor Yellow
+    
+    $scriptPath = $PSCommandPath
+    if (-not $scriptPath) { $scriptPath = $MyInvocation.ScriptName }
+    
+    if ($scriptPath) {
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -Verb RunAs
+        exit
+    } else {
+        Write-Warning "Cannot auto-elevate because the script is being pasted directly into the console."
+        Write-Warning "Please close this window, right-click the Start Button, select 'Windows PowerShell (Admin)' or 'Terminal (Admin)', and try again."
+        exit
+    }
+}
 
 # ------------------------------------------------------------------------------
 # PART 1: ENVIRONMENT SETUP & PLAN RESTORATION
 # ------------------------------------------------------------------------------
- $TargetDir = "C:\ProgramData\K2Emulator"
- $ScriptPath = "$TargetDir\K2Monitor.ps1"
- $TaskName = "K2ProfileEmulator"
+$TargetDir = "C:\ProgramData\K2Emulator"
+$ScriptPath = "$TargetDir\K2Monitor.ps1"
+$TaskName = "K2ProfileEmulator"
+
+# STOP EXISTING TASK FIRST TO PREVENT FILE LOCKS
+Write-Host "Stopping existing K2 tasks to prevent file locks..." -ForegroundColor Cyan
+$existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($existingTask) {
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2 
+}
 
 if (-not (Test-Path $TargetDir)) {
     New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
@@ -21,16 +44,21 @@ if (-not (Test-Path $TargetDir)) {
 Write-Host "Restoring missing default power plans..." -ForegroundColor Cyan
 powercfg -restoredefaultschemes
 
- $ultimatePerfGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
- $existingPlans = powercfg -list
-if ($existingPlans -notmatch $ultimatePerfGuid) {
-    powercfg -duplicatescheme $ultimatePerfGuid
-}
+# Define the GUIDs for the 3 power states
+$powerSaverGuid = "a1841308-3541-4fab-bc81-f71556f20b4a"
+$balancedGuid   = "381b4222-f694-41f0-9685-ff5bb260df2e"
+$highPerfGuid   = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+
+$existingPlans = powercfg -list
+
+if ($existingPlans -notmatch $powerSaverGuid) { powercfg -duplicatescheme $powerSaverGuid }
+if ($existingPlans -notmatch $balancedGuid)   { powercfg -duplicatescheme $balancedGuid }
+if ($existingPlans -notmatch $highPerfGuid)   { powercfg -duplicatescheme $highPerfGuid }
 
 # ------------------------------------------------------------------------------
 # PART 2: THE CORE ENGINE (C# INSIDE POWERSHELL)
 # ------------------------------------------------------------------------------
- $K2ScriptContent = @"
+$K2ScriptContent = @"
 `$K2Code = @'
 using System;
 using System.Runtime.InteropServices;
@@ -55,20 +83,8 @@ public class K2ProfileEmulator
     static extern IntPtr DispatchMessage(ref MSG lpMsg);
 
     // --- POWER API P/INVOKE ---
-    [DllImport("powrprof.dll", EntryPoint = "PowerGetActiveScheme")]
-    public static extern uint PowerGetActiveScheme(IntPtr UserRootPowerKey, out IntPtr ActivePolicyGuid);
-
-    [DllImport("powrprof.dll", EntryPoint = "PowerReadACValueIndex")]
-    static extern uint PowerReadACValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettingsGuid, ref Guid PowerSettingGuid, out uint AcValueIndex);
-
-    [DllImport("powrprof.dll", EntryPoint = "PowerReadDCValueIndex")]
-    static extern uint PowerReadDCValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettingsGuid, ref Guid PowerSettingGuid, out uint DcValueIndex);
-
-    [DllImport("powrprof.dll", EntryPoint = "PowerWriteACValueIndex")]
-    static extern uint PowerWriteACValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettingsGuid, ref Guid PowerSettingGuid, uint AcValueIndex);
-
-    [DllImport("powrprof.dll", EntryPoint = "PowerWriteDCValueIndex")]
-    static extern uint PowerWriteDCValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettingsGuid, ref Guid PowerSettingGuid, uint DcValueIndex);
+    [DllImport("powrprof.dll", EntryPoint = "PowerSetActiveScheme")]
+    static extern uint PowerSetActiveScheme(IntPtr UserRootPowerKey, ref Guid SchemeGuid);
 
     // --- LAPTOP BATTERY CHECK API ---
     [DllImport("kernel32.dll")]
@@ -77,16 +93,13 @@ public class K2ProfileEmulator
     [StructLayout(LayoutKind.Sequential)]
     public struct SYSTEM_POWER_STATUS
     {
-        public byte ACLineStatus; // 0 = Offline, 1 = Online, 255 = Unknown
+        public byte ACLineStatus; // 0 = Offline (Battery), 1 = Online (AC)
         public byte BatteryFlag;
         public byte BatteryLifePercent;
         public byte SystemStatusFlag;
         public uint BatteryLifeTime;
         public uint BatteryFullLifeTime;
     }
-
-    [DllImport("kernel32.dll")]
-    static extern IntPtr LocalFree(IntPtr hMem);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int pt_x; public int pt_y; }
@@ -99,14 +112,24 @@ public class K2ProfileEmulator
     // --- STATE TRACKING VARIABLES ---
     static WinEventDelegate dele = null;
     static DateTime lastBoost = DateTime.MinValue;
+    
+    static bool currentDetectedAC = false;
+    static bool lastAppliedAC = false;
+    static bool isBoosting = false;
+    static bool initialized = false;
 
-    // --- PROCESSOR POWER GUIDs ---
-    static Guid procSubGroup = new Guid("54533251-82be-4824-96c1-47b60b740d00");
-    static Guid minProcState = new Guid("893dee8e-2bef-41e0-89c6-b55d0929964c");
+    // --- POWER PLAN GUIDs ---
+    static Guid powerSaverGuid = new Guid("a1841308-3541-4fab-bc81-f71556f20b4a");
+    static Guid balancedGuid   = new Guid("381b4222-f694-41f0-9685-ff5bb260df2e");
+    static Guid highPerfGuid   = new Guid("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
 
     // --- MAIN INITIALIZATION FUNCTION ---
     public static void StartMonitoring()
     {
+        Thread pollingThread = new Thread(PollPowerStatus);
+        pollingThread.IsBackground = true;
+        pollingThread.Start();
+
         dele = new WinEventDelegate(WinEventProc);
         IntPtr hhook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MENUPOPUPSTART, IntPtr.Zero, dele, 0, 0, WINEVENT_OUTOFCONTEXT);
 
@@ -120,51 +143,72 @@ public class K2ProfileEmulator
         UnhookWinEvent(hhook);
     }
 
-    // --- THE CALLBACK FUNCTION ---
+    static void PollPowerStatus()
+    {
+        while (true)
+        {
+            UpdatePowerState();
+            Thread.Sleep(3000); 
+        }
+    }
+
+    // --- DYNAMIC BASE PLAN SWITCHING LOGIC ---
+    static void UpdatePowerState()
+    {
+        SYSTEM_POWER_STATUS status = new SYSTEM_POWER_STATUS();
+        if (GetSystemPowerStatus(ref status))
+        {
+            currentDetectedAC = (status.ACLineStatus == 1);
+        }
+        
+        if (currentDetectedAC != lastAppliedAC || !initialized)
+        {
+            initialized = true;
+            if (!isBoosting)
+            {
+                lastAppliedAC = currentDetectedAC;
+                if (currentDetectedAC)
+                {
+                    PowerSetActiveScheme(IntPtr.Zero, ref balancedGuid); // AC Base -> Balanced
+                }
+                else
+                {
+                    PowerSetActiveScheme(IntPtr.Zero, ref powerSaverGuid); // Battery Base -> Power Saver
+                }
+            }
+        }
+    }
+
+    // --- THE CALLBACK FUNCTION (WINDOW FOCUS) ---
     static void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
-        if ((DateTime.Now - lastBoost).TotalSeconds > 2.0)
+        // Boost is now allowed on both Battery and AC
+        if ((DateTime.Now - lastBoost).TotalSeconds > 2.0 && !isBoosting)
         {
             lastBoost = DateTime.Now;
             ThreadPool.QueueUserWorkItem(state => BoostCPU());
         }
     }
 
-    // --- THE STEALTH BOOST EXECUTION FUNCTION ---
+    // --- THE TIERED BOOST EXECUTION FUNCTION ---
     static void BoostCPU()
     {
-        // 0. LAPTOP CHECK: If on battery (ACLineStatus == 0), do not boost to save power.
-        // Desktops will always return 1 (Online) and proceed normally.
-        SYSTEM_POWER_STATUS status = new SYSTEM_POWER_STATUS();
-        if (GetSystemPowerStatus(ref status))
-        {
-            if (status.ACLineStatus == 0) 
-            {
-                return; // Skip the boost entirely
-            }
-        }
+        isBoosting = true;
+        
+        // Dynamically select the Boost target and Revert target based on power state
+        Guid boostTarget = currentDetectedAC ? highPerfGuid : balancedGuid;
+        Guid revertTarget = currentDetectedAC ? balancedGuid : powerSaverGuid;
 
-        // 1. Get the currently active power plan
-        IntPtr activeSchemePtr;
-        PowerGetActiveScheme(IntPtr.Zero, out activeSchemePtr);
-        Guid activeScheme = (Guid)Marshal.PtrToStructure(activeSchemePtr, typeof(Guid));
-        LocalFree(activeSchemePtr);
-
-        // 2. Save the current Minimum Processor States (AC and DC)
-        uint acVal = 0, dcVal = 0;
-        bool hasAC = PowerReadACValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, out acVal) == 0;
-        bool hasDC = PowerReadDCValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, out dcVal) == 0;
-
-        // 3. Temporarily set Minimum Processor State to 100% (The K2 Burst)
-        if (hasAC) PowerWriteACValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, 100);
-        if (hasDC) PowerWriteDCValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, 100);
-
-        // 4. Hold this state for exactly 2,000 milliseconds (2 seconds).
+        // 1. Apply the tiered boost
+        PowerSetActiveScheme(IntPtr.Zero, ref boostTarget);
+        
+        // 2. Hold for 2 seconds
         Thread.Sleep(2000);
-
-        // 5. Restore the original Minimum Processor States
-        if (hasAC) PowerWriteACValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, acVal);
-        if (hasDC) PowerWriteDCValueIndex(IntPtr.Zero, ref activeScheme, ref procSubGroup, ref minProcState, dcVal);
+        
+        // 3. Revert to the correct base plan
+        PowerSetActiveScheme(IntPtr.Zero, ref revertTarget);
+        
+        isBoosting = false;
     }
 }
 '@
@@ -179,18 +223,20 @@ Set-Content -Path $ScriptPath -Value $K2ScriptContent -Force
 # ------------------------------------------------------------------------------
 # PART 3: SCHEDULED TASK REGISTRATION
 # ------------------------------------------------------------------------------
- $ArgsString = "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+$ArgsString = "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
 
- $TaskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $ArgsString
- $TaskTrigger = New-ScheduledTaskTrigger -AtLogon
+$TaskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $ArgsString
+$TaskTrigger = New-ScheduledTaskTrigger -AtLogon
 
- $TaskPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -RunLevel Highest
+$TaskPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -RunLevel Highest
 
- $TaskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Days 365)
+$TaskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Days 365)
 
 Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $TaskTrigger -Principal $TaskPrincipal -Settings $TaskSettings -Force
 
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Start-ScheduledTask -TaskName $TaskName
 
-Write-Host "K2 Optimization Active" -ForegroundColor Green
+Write-Host "K2 Tiered Optimization Active" -ForegroundColor Green
+Write-Host "- Battery Base: Power Saver | Window Boost: Balanced" -ForegroundColor Yellow
+Write-Host "- Plugged In Base: Balanced | Window Boost: High Performance" -ForegroundColor Cyan
