@@ -36,7 +36,7 @@ This script provides a highly responsive, user-space emulation of dynamic power 
 
 Do not run the monitor script manually every time. Use the provided deployment script to install it permanently as a hidden system service.
 
-1. Save the deployment script as `K2_Install.ps1`.
+1. Save the deployment script as `K2ProfileEmulator.ps1`.
 2. Run the script (it will automatically elevate to Administrator if needed).
 3. The script will stop any existing tasks to prevent file locks, restore missing power plans, compile the C# API hooks, register the hidden Scheduled Task, and start the optimization immediately. 
 4. You will see the confirmation: `K2 Tiered Optimization Active`.
