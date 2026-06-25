@@ -1,42 +1,45 @@
-# K2 Profile Emulator (V4.2 - Tiered Dynamic Switching)
+# K2 Low-Latency Emulator (Tiered AC/DC Boosting V4.4)
 
-A lightweight, event-driven PowerShell and C# utility that brings dynamic, tiered power plan optimization to any Windows 10 or Windows 11 system. 
+A high-performance PowerShell utility that dynamically switches Windows Power Plans based on window focus and power source, while maintaining a **locked, consistent screen brightness** across all states to prevent flickering.
 
-Instead of permanently locking your CPU to a high-performance state or relying on static power plans, this emulator actively manages your base power profile based on your power source. It hooks directly into the Windows UI message pump to detect shell interactions (e.g., opening the Start Menu, right-clicking, or switching applications) and instantly triggers a 2-second power plan burst to eliminate UI stutter and wake-up latency.
+## 🚀 Features
 
-## ✨ Features
-
-* **Zero Polling UI Hooks:** Uses native `WinEventHook` APIs to react instantly to UI events without wasting CPU cycles in the background.
-* **Dynamic Tiered Power Switching:** Instead of tweaking hidden processor states, it physically switches between Windows power plans. On battery, it boosts from Power Saver to Balanced. On AC, it boosts from Balanced to High Performance.
-* **Active Power Polling:** A background thread checks your AC/Battery status every 3 seconds, ensuring your base power plan is always perfectly matched to your current power source.
-* **Smart Cooldown:** Built-in throttling prevents rapid, overlapping power state changes if you spam-click menus.
-* **Asynchronous Execution:** Power state transitions happen on a background thread pool, ensuring your UI message pump never freezes.
-* **Invisible Operation:** Runs silently as a background Scheduled Task with no open console windows.
-* **Auto-Elevation & Lock Prevention:** Automatically requests Administrator privileges if missing, and safely stops previous instances before updating to prevent file-lock errors.
-* **Self-Healing Power Plans:** Automatically restores missing default Windows power plans (Power Saver, Balanced, High Performance) silently at startup.
+- **Dynamic Plan Switching:** Automatically switches between *Power Saver*, *Balanced*, and *High Performance* plans based on whether a window is in focus.
+- **Ultimate Brightness Lock:** Solves the common issue of screen brightness flickering when switching power plans by synchronizing brightness values across all active schemes using native Windows APIs.
+- **AC/DC Awareness:** Adapts its "Base" and "Boost" targets depending on whether you are plugged in or on battery.
+- **Zero-CPU Overhead:** Uses efficient event hooks and smart caching to only perform actions when necessary.
+- **Persistent Setup:** Installs itself as a Scheduled Task to run automatically at logon with highest privileges.
 
 ## ⚙️ How It Works
 
-This script provides a highly responsive, user-space emulation of dynamic power management:
+| State | Power Source | Base Plan | Window Focus Boost |
+| :--- | :--- | :--- | :--- |
+| **Idle** | 🔋 Battery | Power Saver | Balanced |
+| **Active** | 🔋 Battery | Power Saver | Balanced |
+| **Idle** | 🔌 Plugged In | Balanced | High Performance |
+| **Active** | 🔌 Plugged In | Balanced | High Performance |
 
-1. **Base Plan Management:** A background thread polls `GetSystemPowerStatus` every 3 seconds. If on battery, it sets the base plan to **Power Saver**. If plugged in, it sets the base plan to **Balanced**.
-2. **Event Listening:** It listens for `EVENT_SYSTEM_FOREGROUND` (app switching) and `EVENT_SYSTEM_MENUPOPUPSTART` (system menus).
-3. **Tiered Boost Execution:** When a UI event is triggered, it calculates the correct boost target based on the current power state:
-   * *On Battery:* Instantly switches to **Balanced**.
-   * *On AC Power:* Instantly switches to **High Performance**.
-4. **Timed Reversion:** It holds this boosted state for exactly 2 seconds, then reverts to the correct base plan (Power Saver or Balanced), allowing the system to return to its optimal power/thermal state.
+### The Brightness Fix (V4.4)
+Previous versions suffered from brightness adjustments because Windows stores different brightness levels for each power plan. V4.4 implements:
+1. **Direct Memory Reading:** Uses `PowerReadACValueIndex` to get the exact brightness from the active plan's memory.
+2. **Bulletproof Syncing:** Uses `powercfg.exe` to force-write that exact value to all three power plans simultaneously.
+3. **Smart Caching:** Only syncs when a change is detected, keeping background resource usage at zero.
 
-## 🚀 Prerequisites
+## 📥 Installation
 
-* Windows 10 (1809+) or Windows 11.
-* Administrator Privileges: Required to modify power states and install the Scheduled Task (the script will auto-prompt for UAC elevation if run without them).
-* No Custom GUIDs Needed: The script dynamically targets the default Windows power plan GUIDs.
+1. **Download** the `K2Monitor.ps1` script.
+2. **Right-click** the file and select **Run with PowerShell** (or run as Administrator in your terminal).
+3. The script will automatically:
+   - Restore default power plans if missing.
+   - Create the necessary directory at `C:\ProgramData\K2Emulator`.
+   - Register a Scheduled Task named `K2ProfileEmulator`.
 
-## 🛠️ Installation & Deployment
+## 🛠️ Technical Details
 
-Do not run the monitor script manually every time. Use the provided deployment script to install it permanently as a hidden system service.
+- **Language:** PowerShell / C# (via `Add-Type`)
+- **APIs Used:** `user32.dll` (Event Hooks), `powrprof.dll` (Power Management), `kernel32.dll` (System Status)
+- **Requirements:** Windows 10/11, Administrator Privileges
 
-1. Save the deployment script as `K2ProfileEmulator.ps1`.
-2. Run the script (it will automatically elevate to Administrator if needed).
-3. The script will stop any existing tasks to prevent file locks, restore missing power plans, compile the C# API hooks, register the hidden Scheduled Task, and start the optimization immediately. 
-4. You will see the confirmation: `K2 Tiered Optimization Active`.
+## ⚠️ Disclaimer
+
+This tool modifies system power settings. While it includes safety checks to restore defaults, use it at your own risk. If you experience any issues, you can remove the scheduled task via Task Scheduler and run `powercfg -restoredefaultschemes` in an admin terminal.
