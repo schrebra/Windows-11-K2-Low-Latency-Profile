@@ -43,3 +43,5 @@ Previous versions suffered from brightness adjustments because Windows stores di
 ## ⚠️ Disclaimer
 
 This tool modifies system power settings. While it includes safety checks to restore defaults, use it at your own risk. If you experience any issues, you can remove the scheduled task via Task Scheduler and run `powercfg -restoredefaultschemes` in an admin terminal.
+
+This has not been thoroughly tested and is not recommended for gaming environments.
