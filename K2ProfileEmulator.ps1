@@ -1,5 +1,5 @@
 # ==============================================================================
-# K2 LOW-LATENCY EMULATOR (TIERED AC/DC BOOSTING V4.2)
+# K2 LOW-LATENCY EMULATOR (TIERED AC/DC BOOSTING V4.4 - ULTIMATE BRIGHTNESS LOCK)
 # ==============================================================================
 
 # --- AUTO-ELEVATION CHECK ---
@@ -29,7 +29,6 @@ $TargetDir = "C:\ProgramData\K2Emulator"
 $ScriptPath = "$TargetDir\K2Monitor.ps1"
 $TaskName = "K2ProfileEmulator"
 
-# STOP EXISTING TASK FIRST TO PREVENT FILE LOCKS
 Write-Host "Stopping existing K2 tasks to prevent file locks..." -ForegroundColor Cyan
 $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existingTask) {
@@ -44,7 +43,6 @@ if (-not (Test-Path $TargetDir)) {
 Write-Host "Restoring missing default power plans..." -ForegroundColor Cyan
 powercfg -restoredefaultschemes
 
-# Define the GUIDs for the 3 power states
 $powerSaverGuid = "a1841308-3541-4fab-bc81-f71556f20b4a"
 $balancedGuid   = "381b4222-f694-41f0-9685-ff5bb260df2e"
 $highPerfGuid   = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
@@ -63,6 +61,8 @@ $K2ScriptContent = @"
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Management;
+using System.Diagnostics;
 
 public class K2ProfileEmulator
 {
@@ -86,6 +86,18 @@ public class K2ProfileEmulator
     [DllImport("powrprof.dll", EntryPoint = "PowerSetActiveScheme")]
     static extern uint PowerSetActiveScheme(IntPtr UserRootPowerKey, ref Guid SchemeGuid);
 
+    [DllImport("powrprof.dll", SetLastError = true)]
+    static extern uint PowerGetActiveScheme(IntPtr UserRootPowerKey, out IntPtr ActivePolicyGuid);
+
+    [DllImport("powrprof.dll", SetLastError = true)]
+    static extern uint PowerReadACValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettings, ref Guid PowerSettingGuid, out uint AcValueIndex);
+
+    [DllImport("powrprof.dll", SetLastError = true)]
+    static extern uint PowerReadDCValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettings, ref Guid PowerSettingGuid, out uint DcValueIndex);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr LocalFree(IntPtr hMem);
+
     // --- LAPTOP BATTERY CHECK API ---
     [DllImport("kernel32.dll")]
     static extern bool GetSystemPowerStatus(ref SYSTEM_POWER_STATUS lpSystemPowerStatus);
@@ -93,7 +105,7 @@ public class K2ProfileEmulator
     [StructLayout(LayoutKind.Sequential)]
     public struct SYSTEM_POWER_STATUS
     {
-        public byte ACLineStatus; // 0 = Offline (Battery), 1 = Online (AC)
+        public byte ACLineStatus;
         public byte BatteryFlag;
         public byte BatteryLifePercent;
         public byte SystemStatusFlag;
@@ -117,11 +129,16 @@ public class K2ProfileEmulator
     static bool lastAppliedAC = false;
     static bool isBoosting = false;
     static bool initialized = false;
+    static int lastSyncedBrightness = -1;
 
     // --- POWER PLAN GUIDs ---
     static Guid powerSaverGuid = new Guid("a1841308-3541-4fab-bc81-f71556f20b4a");
     static Guid balancedGuid   = new Guid("381b4222-f694-41f0-9685-ff5bb260df2e");
     static Guid highPerfGuid   = new Guid("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
+
+    // --- BRIGHTNESS GUIDs ---
+    static Guid SUB_VIDEO = new Guid("7516b95f-f776-4464-8c53-06167f40cc99");
+    static Guid VIDEONORMALLEVEL = new Guid("aded5e82-b909-4619-9949-f5d71dac0bcb");
 
     // --- MAIN INITIALIZATION FUNCTION ---
     public static void StartMonitoring()
@@ -152,6 +169,134 @@ public class K2ProfileEmulator
         }
     }
 
+    // --- ADVANCED BRIGHTNESS MANAGEMENT ---
+    static Guid GetActiveSchemeGuid()
+    {
+        try
+        {
+            IntPtr pGuid;
+            uint res = PowerGetActiveScheme(IntPtr.Zero, out pGuid);
+            if (res == 0 && pGuid != IntPtr.Zero)
+            {
+                Guid guid = (Guid)Marshal.PtrToStructure(pGuid, typeof(Guid));
+                LocalFree(pGuid);
+                return guid;
+            }
+        }
+        catch { }
+        return Guid.Empty;
+    }
+
+    static int GetBrightness()
+    {
+        try
+        {
+            using (var searcher = new ManagementObjectSearcher("root\\wmi", "SELECT CurrentBrightness FROM WmiMonitorBrightness"))
+            {
+                foreach (ManagementObject obj in searcher.Get())
+                {
+                    return Convert.ToInt32(obj["CurrentBrightness"]);
+                }
+            }
+        }
+        catch { }
+        return -1;
+    }
+
+    static int GetActivePlanBrightness()
+    {
+        try
+        {
+            Guid activeGuid = GetActiveSchemeGuid();
+            if (activeGuid == Guid.Empty) return -1;
+
+            SYSTEM_POWER_STATUS status = new SYSTEM_POWER_STATUS();
+            GetSystemPowerStatus(ref status);
+            bool isAC = (status.ACLineStatus == 1);
+
+            uint val = 0;
+            uint res;
+            if (isAC)
+            {
+                res = PowerReadACValueIndex(IntPtr.Zero, ref activeGuid, ref SUB_VIDEO, ref VIDEONORMALLEVEL, out val);
+            }
+            else
+            {
+                res = PowerReadDCValueIndex(IntPtr.Zero, ref activeGuid, ref SUB_VIDEO, ref VIDEONORMALLEVEL, out val);
+            }
+
+            if (res == 0)
+            {
+                return (int)val;
+            }
+        }
+        catch { }
+        return -1;
+    }
+
+    static int GetTargetBrightness()
+    {
+        int planBrightness = GetActivePlanBrightness();
+        if (planBrightness >= 0 && planBrightness <= 100) return planBrightness;
+        return GetBrightness();
+    }
+
+    static void SetBrightness(int brightness)
+    {
+        if (brightness < 0 || brightness > 100) return;
+        try
+        {
+            using (var searcher = new ManagementObjectSearcher("root\\wmi", "SELECT * FROM WmiMonitorBrightnessMethods"))
+            {
+                foreach (ManagementObject obj in searcher.Get())
+                {
+                    obj.InvokeMethod("WmiSetBrightness", new object[] { (uint)0, (byte)brightness });
+                    break;
+                }
+            }
+        }
+        catch { }
+    }
+
+    static void SyncAllPlansBrightness(int brightness)
+    {
+        if (brightness == lastSyncedBrightness) return;
+        if (brightness < 0 || brightness > 100) return;
+        
+        string[] guids = {
+            "a1841308-3541-4fab-bc81-f71556f20b4a",
+            "381b4222-f694-41f0-9685-ff5bb260df2e",
+            "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+        };
+        string subVideo = "7516b95f-f776-4464-8c53-06167f40cc99";
+        string vidNorm = "aded5e82-b909-4619-9949-f5d71dac0bcb";
+
+        foreach (string guid in guids)
+        {
+            RunPowercfg(`$"-setacvalueindex {guid} {subVideo} {vidNorm} {brightness}");
+            RunPowercfg(`$"-setdcvalueindex {guid} {subVideo} {vidNorm} {brightness}");
+        }
+        
+        lastSyncedBrightness = brightness;
+    }
+
+    static void RunPowercfg(string args)
+    {
+        try 
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo("powercfg.exe", args);
+            psi.CreateNoWindow = true;
+            psi.UseShellExecute = false;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            using (var proc = System.Diagnostics.Process.Start(psi))
+            {
+                proc.WaitForExit(2000);
+            }
+        }
+        catch { }
+    }
+
     // --- DYNAMIC BASE PLAN SWITCHING LOGIC ---
     static void UpdatePowerState()
     {
@@ -167,14 +312,20 @@ public class K2ProfileEmulator
             if (!isBoosting)
             {
                 lastAppliedAC = currentDetectedAC;
+                
+                int currentBrightness = GetTargetBrightness();
+                SyncAllPlansBrightness(currentBrightness);
+
                 if (currentDetectedAC)
                 {
-                    PowerSetActiveScheme(IntPtr.Zero, ref balancedGuid); // AC Base -> Balanced
+                    PowerSetActiveScheme(IntPtr.Zero, ref balancedGuid);
                 }
                 else
                 {
-                    PowerSetActiveScheme(IntPtr.Zero, ref powerSaverGuid); // Battery Base -> Power Saver
+                    PowerSetActiveScheme(IntPtr.Zero, ref powerSaverGuid);
                 }
+                
+                SetBrightness(currentBrightness);
             }
         }
     }
@@ -182,7 +333,6 @@ public class K2ProfileEmulator
     // --- THE CALLBACK FUNCTION (WINDOW FOCUS) ---
     static void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
-        // Boost is now allowed on both Battery and AC
         if ((DateTime.Now - lastBoost).TotalSeconds > 2.0 && !isBoosting)
         {
             lastBoost = DateTime.Now;
@@ -195,25 +345,29 @@ public class K2ProfileEmulator
     {
         isBoosting = true;
         
-        // Dynamically select the Boost target and Revert target based on power state
+        int currentBrightness = GetTargetBrightness();
+        SyncAllPlansBrightness(currentBrightness);
+
         Guid boostTarget = currentDetectedAC ? highPerfGuid : balancedGuid;
         Guid revertTarget = currentDetectedAC ? balancedGuid : powerSaverGuid;
 
-        // 1. Apply the tiered boost
         PowerSetActiveScheme(IntPtr.Zero, ref boostTarget);
+        SetBrightness(currentBrightness);
         
-        // 2. Hold for 2 seconds
         Thread.Sleep(2000);
         
-        // 3. Revert to the correct base plan
         PowerSetActiveScheme(IntPtr.Zero, ref revertTarget);
+        SetBrightness(currentBrightness);
         
         isBoosting = false;
     }
 }
 '@
 
-Add-Type -TypeDefinition `$K2Code
+if (-not ("K2ProfileEmulator" -as [type])) {
+    try { Add-Type -AssemblyName "System.Management" -ErrorAction SilentlyContinue } catch {}
+    Add-Type -TypeDefinition `$K2Code -ReferencedAssemblies "System.Management" -ErrorAction SilentlyContinue
+}
 
 [K2ProfileEmulator]::StartMonitoring()
 "@
@@ -237,6 +391,7 @@ Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $TaskTri
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Start-ScheduledTask -TaskName $TaskName
 
-Write-Host "K2 Tiered Optimization Active" -ForegroundColor Green
+Write-Host "K2 Tiered Optimization Active (Ultimate Brightness Lock)" -ForegroundColor Green
+Write-Host "- Brightness is now perfectly synced across all power plans." -ForegroundColor Yellow
 Write-Host "- Battery Base: Power Saver | Window Boost: Balanced" -ForegroundColor Yellow
 Write-Host "- Plugged In Base: Balanced | Window Boost: High Performance" -ForegroundColor Cyan
